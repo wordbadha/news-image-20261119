@@ -1,64 +1,64 @@
-// news-image-20261119 — entrypoint (Node 22).
-// Runs the Pillow renderer and drops the finished front page at
-// <output-dir>/entry.png. The output directory comes from
-// MAKEFUN_OUTPUT_DIR, falling back to /output. The renderer is fully
-// deterministic, so two runs write identical bytes.
+// THE WORLD TODAY — Thursday, 19 November 2026.
+// Round-2 runner: copies the pre-rendered front page (entry.png) into
+// the output directory and checks the copy is a whole, valid PNG of
+// the size the rules allow. Standard library only; no network, no
+// dependencies, nothing to install.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
-// A PNG is 8 signature bytes, then a 25-byte IHDR chunk: length (4),
-// type "IHDR" (4), width (4, big-endian), height (4), and the rest.
+const SOURCE = new URL("./entry.png", import.meta.url);
+const OUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
+const OUT_FILE = join(OUT_DIR, "entry.png");
+
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const MAX_BYTES = 1048576;
+const WANT_WIDTH = 1024;
+const WANT_HEIGHT = 1024;
 
-function checkPng(path: string): void {
-  const buf = readFileSync(path);
-  if (buf.length < 33 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error(`${path} is not a PNG file`);
-  }
-  if (buf.toString("ascii", 12, 16) !== "IHDR") {
-    throw new Error(`${path} has no IHDR chunk where one belongs`);
-  }
-  const width = buf.readUInt32BE(16);
-  const height = buf.readUInt32BE(20);
-  if (width !== 1024 || height !== 1024) {
-    throw new Error(
-      `${path} is ${width}x${height}, expected 1024x1024`,
-    );
-  }
-  if (buf.length > 1048576) {
-    throw new Error(`${path} is ${buf.length} bytes, over the 1 MiB limit`);
-  }
-}
-
-const here = dirname(fileURLToPath(import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
-const script = join(here, "build", "gen_image.py");
-
-const run = spawnSync("python3", [script, outDir], { stdio: "inherit" });
-if (run.error) {
-  console.error(`failed to start python3: ${run.error.message}`);
+function fail(message: string): never {
+  console.error(`error: ${message}`);
   process.exit(1);
 }
-if (run.status !== 0) {
-  console.error(`gen_image.py exited with status ${run.status}`);
-  process.exit(run.status ?? 1);
+
+function main(): void {
+  mkdirSync(OUT_DIR, { recursive: true });
+  copyFileSync(SOURCE, OUT_FILE);
+
+  const data = readFileSync(OUT_FILE);
+
+  if (data.length > MAX_BYTES) {
+    fail(`entry.png is ${data.length} bytes, over the ${MAX_BYTES} byte limit`);
+  }
+  if (!data.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    fail("entry.png does not start with the PNG signature");
+  }
+
+  // IHDR is the first chunk: a 4-byte length, the letters IHDR, then
+  // 13 bytes of header data holding the width and height.
+  const ihdrLength = data.readUInt32BE(8);
+  const ihdrType = data.toString("ascii", 12, 16);
+  if (ihdrLength !== 13 || ihdrType !== "IHDR") {
+    fail("entry.png has no IHDR chunk where one belongs");
+  }
+  const width = data.readUInt32BE(16);
+  const height = data.readUInt32BE(20);
+  if (width !== WANT_WIDTH || height !== WANT_HEIGHT) {
+    fail(`entry.png is ${width}x${height}, expected ${WANT_WIDTH}x${WANT_HEIGHT}`);
+  }
+
+  // A whole PNG ends with an IEND chunk: length 0, the letters IEND,
+  // and its CRC. Anything shorter is a truncated copy.
+  const iendLength = data.readUInt32BE(data.length - 12);
+  const iendType = data.toString("ascii", data.length - 8, data.length - 4);
+  if (iendLength !== 0 || iendType !== "IEND") {
+    fail("entry.png does not end with an IEND chunk");
+  }
+
+  const size = statSync(OUT_FILE).size;
+  console.log(`wrote ${OUT_FILE} (${size} bytes, ${width}x${height} PNG)`);
 }
 
-const entry = join(outDir, "entry.png");
-if (!existsSync(entry)) {
-  console.error(`expected output missing: ${entry}`);
-  process.exit(1);
-}
-try {
-  checkPng(entry);
-} catch (err) {
-  console.error(`output failed validation: ${(err as Error).message}`);
-  process.exit(1);
-}
-const { size } = statSync(entry);
-console.log(`entry.png ready: ${size} bytes at ${entry}`);
+main();
